@@ -2,11 +2,18 @@ from falcor import *
 
 def render_graph_RTPM():
     g = RenderGraph("RTPM")
-    g.create_pass('VBufferRT', 'VBufferRT', {
+    g.create_pass('VBufferSC', 'VBufferSC', {
         'outputSize': 'Default',
         'samplePattern': 'Stratified',
         'sampleCount': 16,
         'useAlphaTest': True,
+        'adjustShadingNormals': True,
+        'forceCullMode': False,
+        'cull': 'Back',
+        'useTraceRayInline': False,
+        'useDOF': True,
+        'specRoughCutoff': 0.1,
+        'recursionDepth': 10,
     })
     g.create_pass('RTPM', 'RTPM', {
         'usePhotonVisualization': False,
@@ -35,8 +42,11 @@ def render_graph_RTPM():
         'shutter': 1.0,
         'exposureMode': 'AperturePriority',
     })
-    g.add_edge('VBufferRT.vbuffer', 'RTPM.vbuffer')
-    g.add_edge('VBufferRT.viewW', 'RTPM.viewW')
+    g.add_edge('VBufferSC.vbuffer', 'RTPM.vbuffer')
+    g.add_edge('VBufferSC.viewW', 'RTPM.viewW')
+    g.add_edge('VBufferSC.throughput', 'RTPM.thp')
+    g.add_edge('VBufferSC.emissive', 'RTPM.emissive')
+    g.add_edge('VBufferSC.normale', 'RTPM.normale')
     g.add_edge('RTPM.PhotonImage', 'AccumulatePass.input')
     g.add_edge('AccumulatePass.output', 'ToneMapper.src')
     g.mark_output('ToneMapper.dst')

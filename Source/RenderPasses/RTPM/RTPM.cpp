@@ -54,9 +54,9 @@ const uint32_t kMaxRecursionDepth = 2u;
 const ChannelList kInputChannels = {
     {"vbuffer", "gVBuffer", "V Buffer to get the intersected triangle", false},
     {"viewW", "gViewWorld", "World View Direction", false},
-    {"thp", "gThp", "Throughput", true /* optional */},
-    {"emissive", "gEmissive", "Emissive", true /* optional */},
-    {"normale", "gNormale", "The Geometry normal of the intersected triangle", true /* optional */}};
+    {"thp", "gThp", "Throughput", false},
+    {"emissive", "gEmissive", "Emissive", false},
+    {"normale", "gNormale", "The Geometry normal of the intersected triangle", false}};
 
 const ChannelList kOutputChannels = {
     {"PhotonImage", "gPhotonImage", "An image that shows indirect light from photons", false, ResourceFormat::RGBA32Float}};
