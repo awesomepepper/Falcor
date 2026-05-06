@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(copy \"C:\\\\code\\\\pm\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMGenerate.rt.slang\" \"c:\\\\code\\\\MyFalcor\\\\Falcor\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMGenerate.rt.slang\")",
+      "Bash(copy \"C:\\\\code\\\\pm\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMCollect.cs.slang\" \"c:\\\\code\\\\MyFalcor\\\\Falcor\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMCollect.cs.slang\")",
+      "Bash(copy \"C:\\\\code\\\\pm\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMVisual.cs.slang\" \"c:\\\\code\\\\MyFalcor\\\\Falcor\\\\Source\\\\RenderPasses\\\\RTPM\\\\PMVisual.cs.slang\")",
+      "Bash(cmake --preset windows-vs2022-vscode)",
+      "Bash(cmake --build build/windows-vs2022-vscode --target RTPM --config Debug)",
+      "Bash(cmake --build build/windows-vs2022-vscode --target RTPM --config Release)",
+      "PowerShell(Stop-Process -Name \"Mogwai\" -Force -ErrorAction SilentlyContinue)",
+      "Bash(.\\\\build\\\\windows-vs2022-vscode\\\\bin\\\\Debug\\\\Mogwai.exe --script scripts\\\\RTPM.py)",
+      "Bash(Start-Sleep -Seconds 8)",
+      "Bash(Get-Process -Name \"Mogwai\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object Id, ProcessName)"
+    ]
+  }
+}
