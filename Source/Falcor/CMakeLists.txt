@@ -311,6 +311,10 @@ target_sources(Falcor PRIVATE
     Rendering/Volumes/GridVolumeSampler.slang
     Rendering/Volumes/GridVolumeSamplerParams.slang
 
+    Rendering/AccelerationStructure/CustomAccelerationStructure.cpp
+    Rendering/AccelerationStructure/CustomAccelerationStructure.h
+    Rendering/AccelerationStructure/ClearAABBs.cs.slang
+
     RenderPasses/ResolvePass.cpp
     RenderPasses/ResolvePass.h
 
