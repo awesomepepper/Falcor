@@ -1,0 +1,75 @@
+/***************************************************************************
+ * Compatibility extensions for ReSTIRShadingData.
+ * Adds old-style accessors that delegate to new ReSTIRShadingData + mtl header.
+ **************************************************************************/
+#pragma once
+
+#define ROUGHNESS_THRESHOLD 0.01
+
+import IBxDF;
+
+extension ReSTIRShadingData
+{
+    // Material properties (from mtl header)
+    property uint activeLobes
+    {
+        [mutating] get { return mtl.getActiveLobes(); }
+        [mutating] set(uint value) { mtl.setActiveLobes(value); }
+    }
+
+    property float3 diffuse
+    {
+        get { return getDiffuse(); }
+    }
+
+    property float3 specular
+    {
+        get { return getSpecular(); }
+    }
+
+    property float linearRoughness
+    {
+        get { return getRoughness(); }
+        set { setRoughness(value); }
+    }
+
+    property float roughness
+    {
+        get { return getRoughness(); }
+        set { setRoughness(value); }
+    }
+
+    property float metallic
+    {
+        get { return getMetallic(); }
+    }
+
+    property float3 transmission
+    {
+        get { return float3(getTransmission()); }
+    }
+
+    property float eta
+    {
+        get { return IoR; }
+    }
+
+    property float specularTransmission
+    {
+        get { return getSpecularTransmission(); }
+    }
+
+    property float diffuseTransmission
+    {
+        get { return getDiffuseTransmission(); }
+    }
+
+    property float3 N
+    {
+        get { return frame.N; }
+    }
+
+    bool getActiveLobes() { return mtl.getActiveLobes(); }
+    void setActiveLobes(uint activeLobes) { mtl.setActiveLobes(activeLobes); }
+    bool isThinSurface() { return mtl.getThinSurface(); }
+}
