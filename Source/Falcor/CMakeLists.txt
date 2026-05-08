@@ -297,6 +297,28 @@ target_sources(Falcor PRIVATE
     Rendering/RTXDI/RTXDISetup.cs.slang
     Rendering/RTXDI/SurfaceData.slang
 
+    Rendering/WorldSpaceReSTIRGI/BuildHashGrid.cs.slang
+    Rendering/WorldSpaceReSTIRGI/BxDF.slang
+    Rendering/WorldSpaceReSTIRGI/BxDFConfig.slangh
+    Rendering/WorldSpaceReSTIRGI/FinalSample.cs.slang
+    Rendering/WorldSpaceReSTIRGI/GIFinalSample.slang
+    Rendering/WorldSpaceReSTIRGI/GIReservoir.slang
+    Rendering/WorldSpaceReSTIRGI/HashBuildStructure.slang
+    Rendering/WorldSpaceReSTIRGI/IBxDF.slang
+    Rendering/WorldSpaceReSTIRGI/InitialReservoirs.cs.slang
+    Rendering/WorldSpaceReSTIRGI/InitialSamples.slang
+    Rendering/WorldSpaceReSTIRGI/LoadShadingData.slang
+    Rendering/WorldSpaceReSTIRGI/MaterialHelpers.slang
+    Rendering/WorldSpaceReSTIRGI/MaterialShading.slang
+    Rendering/WorldSpaceReSTIRGI/Microfacet.slang
+    Rendering/WorldSpaceReSTIRGI/OldShadingData.slang
+    Rendering/WorldSpaceReSTIRGI/Params.slang
+    Rendering/WorldSpaceReSTIRGI/ReconnectionData.slang
+    Rendering/WorldSpaceReSTIRGI/ReflectTypes.cs.slang
+    Rendering/WorldSpaceReSTIRGI/SpatiotemporalResampling.cs.slang
+    Rendering/WorldSpaceReSTIRGI/WorldSpaceReSTIRGI.cpp
+    Rendering/WorldSpaceReSTIRGI/WorldSpaceReSTIRGI.h
+
     Rendering/Utils/PixelStats.cpp
     Rendering/Utils/PixelStats.cs.slang
     Rendering/Utils/PixelStats.h
