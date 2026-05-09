@@ -44,6 +44,7 @@ namespace
     const std::string kInputNormBuffer = "vNormW";
 
     const std::string kOutputColor = "outputColor";
+    const std::string kSpatialDebugMode = "spatialDebugMode";
 
     const ChannelList kInputChannels = {
         // clang-format off
@@ -78,13 +79,17 @@ void WorldSpaceReSTIRGIPass::parseProperties(const Properties& props)
 {
     for (const auto& [key, value] : props)
     {
-        // Parse options from properties if needed
+        if (key == kSpatialDebugMode)
+            mOptions.spatialDebugMode = value;
+        else
+            logWarning("Unknown property '{}' in WorldSpaceReSTIRGIPass properties.", key);
     }
 }
 
 Properties WorldSpaceReSTIRGIPass::getProperties() const
 {
     Properties props;
+    props[kSpatialDebugMode] = mOptions.spatialDebugMode;
     return props;
 }
 

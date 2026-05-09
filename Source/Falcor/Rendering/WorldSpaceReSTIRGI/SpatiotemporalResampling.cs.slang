@@ -92,6 +92,47 @@ struct ResampleManager
         return V;
     }
 
+    float3 DebugColorFromHash(uint value)
+    {
+        uint r = pcg32(value);
+        uint g = pcg32(r);
+        uint b = pcg32(g);
+        return 0.15f + 0.85f * float3(r & 255u, g & 255u, b & 255u) / 255.f;
+    }
+
+    float3 DebugColorFromSampleCount(uint sampleCount)
+    {
+        float t = saturate(log2(float(sampleCount) + 1.f) / 8.f);
+        return lerp(float3(0.02f, 0.04f, 0.2f), float3(1.f, 0.85f, 0.05f), t);
+    }
+
+    Reservoir MakeSpatialDebugReservoir(ReSTIRShadingData sd, inout SampleGenerator sg)
+    {
+        Reservoir r = { };
+        r.vPos = sd.posW;
+        r.vNorm = sd.N;
+        r.sPos = sd.posW + sd.N;
+        r.sNorm = sd.N;
+        r.M = 1u;
+        r.weightF = 1.f;
+        r.age = 0;
+
+        float cellSize = CalculateCellSize(sd.posW, gScene.camera.data.posW, params);
+        float3 jitteredPos = sd.posW + (sampleNext3D(sg) * 2.0f - 1.0f) * 0.1f * cellSize;
+        int cellIdx = FindCell(jitteredPos, sd.N, cellSize, params, checkSum);
+
+        float3 color = float3(1.f, 0.f, 1.f);
+        if (cellIdx != -1)
+        {
+            uint sampleCount = cellCounters.Load(uint(cellIdx) * 4);
+            color = params.spatialDebugMode == 1u ? DebugColorFromHash(uint(cellIdx)) : DebugColorFromSampleCount(sampleCount);
+        }
+
+        float3 bsdf = max(evalBSDFCosine(sd, sd.N), float3(0.01f));
+        r.radiance = color / bsdf;
+        return r;
+    }
+
     void execute(uint2 pixel)
     {
         // get shadingdata
@@ -161,9 +202,16 @@ struct ResampleManager
         temporalReservoir.vNorm = initialSample.vNorm;
         SetReservoirs(currentReservoirs, currentIDx, 0, params.frameDim.x * params.frameDim.y, temporalReservoir);
 
+        if (params.spatialDebugMode != 0u)
+        {
+            Reservoir debugReservoir = MakeSpatialDebugReservoir(sd, sg);
+            SetReservoirs(currentReservoirs, currentIDx, 1, params.frameDim.x * params.frameDim.y, debugReservoir);
+            return;
+        }
+
         // 强制跳过空间复用
-        SetReservoirs(currentReservoirs, currentIDx, 1, params.frameDim.x * params.frameDim.y, temporalReservoir);
-        return;
+        // SetReservoirs(currentReservoirs, currentIDx, 1, params.frameDim.x * params.frameDim.y, temporalReservoir);
+        // return;
 
         // spatial Reuse
         Reservoir spatialReservoir = GetReservoirs(preReservoirs, preIDx, 0, params.frameDim.x * params.frameDim.y);

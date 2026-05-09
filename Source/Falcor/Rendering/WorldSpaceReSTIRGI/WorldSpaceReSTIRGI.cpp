@@ -20,6 +20,13 @@ namespace Falcor
             {(uint32_t)WorldSpaceReSTIRGI::TargetPdf::IncomingRadiance, "incoming radiance"},
             {(uint32_t)WorldSpaceReSTIRGI::TargetPdf::OutgoingRadiance, "outgoing radiance"},
         };
+
+        const Gui::DropdownList kSpatialDebugModeList =
+        {
+            {0u, "off"},
+            {1u, "cell id"},
+            {2u, "sample count"},
+        };
     }
 
     WorldSpaceReSTIRGI::WorldSpaceReSTIRGI(ref<Device> pDevice, ref<Scene> pScene, const Options& options, uint instanceID, uint numInstance)
@@ -60,6 +67,7 @@ namespace Falcor
             runtimeDirty |= widget.var("Normal threshold", mOptions.normalThreshold, 0.f, 1.f);
             runtimeDirty |= widget.var("Depth threshold", mOptions.depthThreshold, 0.f, 1.f);
             runtimeDirty |= widget.var("Cells Dimension", mOptions.sceneGridDimension, 1u, 300u);
+            runtimeDirty |= widget.dropdown("Spatial debug", kSpatialDebugModeList, mOptions.spatialDebugMode);
 
             staticDirty |= widget.var("Roughness threshold", mOptions.roughnessThreshold, 0.f, 1.2f);
             staticDirty |= widget.dropdown("Target pdf mode", kReSTIRGIModeList, reinterpret_cast<uint32_t&>(mOptions.resamplingTargetPdf));
@@ -83,6 +91,7 @@ namespace Falcor
 
         params._pad = float4(0, 0, 0, 0);
         params.minCellSize = std::max(boundingSize.x, std::max(boundingSize.y, boundingSize.z));
+        params.spatialDebugMode = mOptions.spatialDebugMode;
 
         if (resourcesChanged || params.frameCount == 0)
         {

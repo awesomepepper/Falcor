@@ -30,6 +30,7 @@ namespace Falcor
 
             float roughnessThreshold = 0.2f;
             uint sceneGridDimension = 80u;
+            uint spatialDebugMode = 0u;
             TargetPdf resamplingTargetPdf = TargetPdf::IncomingRadiance;
         };
 

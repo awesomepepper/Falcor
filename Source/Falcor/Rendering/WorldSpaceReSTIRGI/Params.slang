@@ -13,7 +13,8 @@ struct GIParameter
     float fov = 0.f;
 
     float4 _pad = { };
-    float minCellSize = 0.0f;   
+    float minCellSize = 0.0f;
+    uint spatialDebugMode = 0u;
 };
 
 END_NAMESPACE_FALCOR
