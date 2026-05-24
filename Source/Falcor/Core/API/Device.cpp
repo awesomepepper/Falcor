@@ -587,20 +587,30 @@ Device::Device(const Desc& desc) : mDesc(desc)
     {
         ID3D12Device* pD3D12Device = getNativeHandle().as<ID3D12Device*>();
 
-        FALCOR_MAKE_SMART_COM_PTR(ID3D12InfoQueue);
-        ID3D12InfoQueuePtr pInfoQueue;
-        pD3D12Device->QueryInterface(IID_PPV_ARGS(&pInfoQueue));
-        D3D12_MESSAGE_ID hideMessages[] = {
-            D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
-            D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
-        };
-        D3D12_INFO_QUEUE_FILTER f = {};
-        f.DenyList.NumIDs = (UINT)std::size(hideMessages);
-        f.DenyList.pIDList = hideMessages;
-        pInfoQueue->AddStorageFilterEntries(&f);
+        if (pD3D12Device)
+        {
+            ID3D12InfoQueue* pInfoQueue = nullptr;
+            HRESULT hr = pD3D12Device->QueryInterface(IID_PPV_ARGS(&pInfoQueue));
+            if (SUCCEEDED(hr) && pInfoQueue)
+            {
+                D3D12_MESSAGE_ID hideMessages[] = {
+                    D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+                    D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+                };
+                D3D12_INFO_QUEUE_FILTER f = {};
+                f.DenyList.NumIDs = (UINT)std::size(hideMessages);
+                f.DenyList.pIDList = hideMessages;
+                pInfoQueue->AddStorageFilterEntries(&f);
 
-        // Break on DEVICE_REMOVAL_PROCESS_AT_FAULT
-        pInfoQueue->SetBreakOnID(D3D12_MESSAGE_ID_DEVICE_REMOVAL_PROCESS_AT_FAULT, true);
+                // Break on DEVICE_REMOVAL_PROCESS_AT_FAULT
+                pInfoQueue->SetBreakOnID(D3D12_MESSAGE_ID_DEVICE_REMOVAL_PROCESS_AT_FAULT, true);
+                pInfoQueue->Release();
+            }
+            else
+            {
+                logWarning("Failed to get ID3D12InfoQueue interface. D3D12 debug message filtering is disabled.");
+            }
+        }
     }
 #endif
 

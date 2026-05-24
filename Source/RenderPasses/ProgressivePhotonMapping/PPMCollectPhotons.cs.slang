@@ -1,0 +1,532 @@
+/**
+ * PPM Photon Collection Shader (Compute)
+ * Supports two modes via USE_PROBABILISTIC_PPM define:
+ *
+ * Mode 1 (USE_PROBABILISTIC_PPM = 1): "Memoryless" Probabilistic PPM (Knaus & Zwicker, TOG 2011)
+ *   - Global radius schedule: r_k = r_0 * k^{-(1-alpha)/2} (computed on CPU, passed as gCurrentRadius)
+ *   - Each frame independently estimates radiance: L_k = photonContrib / (pi * r_k^2)
+ *   - Running average across frames: L = (1/N) * sum L_k
+ *   - NO per-pixel radius, NO per-pixel photon count, NO tau recursion
+ *   - Only per-pixel state: radianceSum (sum of L_k) and emissionSum
+ *   - Supports random camera paths each frame (glossy, DOF, motion blur)
+ *
+ * Mode 2 (USE_PROBABILISTIC_PPM = 0): Standard SPPM (Hachisuka et al. 2009)
+ *   - Accumulates tau: tau_new = (tau_old + Phi) * (r_new^2 / r_old^2)
+ *   - Radius reduction: Nnew = N + alpha*M, r_new^2 = r_old^2 * Nnew/(N+M)
+ *   - Output: direct/iter + tau / (pi * r^2 * iter)
+ *   - Better for fixed camera paths with high photon counts
+ */
+
+#include "Scene/SceneDefines.slangh"
+#include "Utils/Math/MathConstants.slangh"
+
+import Scene.Raytracing;
+import Scene.RaytracingInline;
+import Scene.Intersection;
+import Utils.Math.MathHelpers;
+import Utils.Geometry.GeometryHelpers;
+import Utils.Sampling.SampleGenerator;
+import Rendering.Lights.LightHelpers;
+import PPMParams;
+
+#if USE_EMISSIVE_LIGHTS
+import Rendering.Lights.EmissiveLightSampler;
+import Rendering.Lights.EmissiveLightSamplerHelpers;
+#endif
+
+cbuffer CB
+{
+    uint gFrameCount;
+    uint2 gFrameDim;
+    float gInitialRadius;       // Initial search radius
+    uint gNumPhotonsPerFrame;   // Number of photons emitted per frame
+    float gAlpha;               // Radius reduction parameter alpha (0.6~0.9)
+    float gCellSize;            // Hash grid cell size (= initial radius, for photon lookup)
+    float gCurrentRadius;       // Probabilistic PPM: global radius for this iteration (r_k = r_0 * k^{-(1-alpha)/2})
+    uint gDisplayMode;          // Display mode: 0=Full, 1=DirectOnly, 2=IndirectOnly
+}
+
+#if USE_EMISSIVE_LIGHTS
+cbuffer EmissiveLight
+{
+    EmissiveLightSampler gEmissiveSampler;
+}
+#endif
+
+// Input
+Texture2D<PackedHitInfo> gVBuffer;
+Texture2D<float4> gViewW;
+
+StructuredBuffer<PPMPhotonSorted> gSortedPhotonBuffer;  // Sorted photon buffer（按 cell 连续存储）
+Buffer<uint> gPhotonCounter;
+ByteAddressBuffer gCellOffset;   // 每个 cell 的起始偏移（prefix sum 结果，raw buffer）
+Buffer<uint> gCellCounter;       // 每个 cell 中实际写入 sorted buffer 的光子数量（scatter pass 的 atomic counter 结果）
+
+// Input/Output: per-pixel persistent statistics
+RWStructuredBuffer<PPMPixelStats> gPixelStats;
+
+// Output
+RWTexture2D<float4> gOutputColor;
+
+static const uint kPhotonBufferSize = PHOTON_BUFFER_SIZE;
+static const float kRoughnessThreshold = ROUGHNESS_THRESHOLD;
+static const uint kMaxCameraBounces = MAX_CAMERA_BOUNCES;
+
+#define is_valid(name) (is_valid_##name != 0)
+
+/** Get primary ray direction */
+float3 getPrimaryRayDir(uint2 pixel, uint2 frameDim)
+{
+    if (is_valid(gViewW))
+    {
+        return -gViewW[pixel].xyz;
+    }
+    else
+    {
+        return gScene.camera.computeRayPinhole(pixel, frameDim).dir;
+    }
+}
+
+/** Load shading data from hit info */
+ShadingData loadShadingDataFromHit(const HitInfo hit, const float3 rayOrigin, const float3 rayDir)
+{
+    const TriangleHit triangleHit = hit.getTriangleHit();
+    VertexData v = gScene.getVertexData(triangleHit);
+    uint materialID = gScene.getMaterialID(triangleHit.instanceID);
+    ShadingData sd = gScene.materials.prepareShadingData(v, materialID, -rayDir);
+    return sd;
+}
+
+/** Evaluate direct lighting from analytic lights */
+float3 evalDirectAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
+{
+#if USE_ANALYTIC_LIGHTS
+    const uint lightCount = gScene.getLightCount();
+    if (lightCount == 0) return float3(0.f);
+
+    const uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
+    float invPdf = lightCount;
+
+    AnalyticLightSample ls;
+    if (!sampleLight(sd.posW, gScene.getLight(lightIndex), sg, ls)) return float3(0.f);
+
+    const uint lobeTypes = mi.getLobeTypes(sd);
+    const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
+    const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
+    float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
+    if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
+        return float3(0.f);
+
+    const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+
+    // Visibility test using inline ray query
+    SceneRayQuery<1> rayQuery;
+    const Ray shadowRay = Ray(origin, ls.dir, 0.f, ls.distance * 0.999f);
+    bool visible = rayQuery.traceVisibilityRay(shadowRay, RAY_FLAG_NONE, 0xff);
+    if (!visible) return float3(0.f);
+
+    return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
+#else
+    return float3(0.f);
+#endif
+}
+
+/** Evaluate direct lighting from emissive lights (NEE) */
+float3 evalDirectEmissive(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
+{
+#if USE_EMISSIVE_LIGHTS
+    // Use EmissiveLightSampler to sample a point on an emissive triangle
+    TriangleLightSample tls;
+    if (!gEmissiveSampler.sampleLight(sd.posW, sd.getOrientedFaceNormal(), true, sg, tls))
+        return float3(0.f);
+
+    if (tls.pdf <= 0.f)
+        return float3(0.f);
+
+    // Compute light contribution Li / pdf
+    float3 Li = tls.Le / tls.pdf;
+
+    // Check if direction is in the correct hemisphere
+    float NdotL = dot(sd.getOrientedFaceNormal(), tls.dir);
+    if (NdotL <= kMinCosTheta)
+        return float3(0.f);
+
+    // Compute shadow ray origin (offset to avoid self-intersection)
+    float3 lightPos = computeRayOrigin(tls.posW, tls.normalW);
+    float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, lightPos - sd.posW) >= 0.f ? sd.faceN : -sd.faceN);
+    float3 toLight = lightPos - origin;
+    float distance = length(toLight);
+    float3 dir = toLight / distance;
+
+    // Visibility test
+    SceneRayQuery<1> rayQuery;
+    const Ray shadowRay = Ray(origin, dir, 0.f, distance * 0.999f);
+    bool visible = rayQuery.traceVisibilityRay(shadowRay, RAY_FLAG_NONE, 0xff);
+    if (!visible) return float3(0.f);
+
+    // Evaluate BSDF value
+    return mi.eval(sd, dir, sg) * Li;
+#else
+    return float3(0.f);
+#endif
+}
+
+/** Helper: write early exit result and return */
+void writeEarlyExit(uint2 pixel, uint pixelIdx, float3 emission)
+{
+    PPMPixelStats ps = gPixelStats[pixelIdx];
+    if (gFrameCount == 0)
+    {
+        ps.radius2 = gInitialRadius * gInitialRadius;
+        ps.N = 0;
+        ps.tau = float3(0);
+        ps.emissionSum = float3(0);
+    }
+    ps.emissionSum += emission;
+
+#if USE_PROBABILISTIC_PPM
+    // Probabilistic PPM (Knaus & Zwicker 2011): Memoryless progressive photon mapping.
+    // No per-pixel radius or photon count needed. Radius is a global schedule.
+    // This frame contributes L_k = 0 (no photons found), just accumulate emission.
+    gPixelStats[pixelIdx] = ps;
+
+    // Output: running average over (gFrameCount+1) iterations
+    float iter = float(gFrameCount + 1);
+    float3 avgEmission = ps.emissionSum / iter;
+    float3 avgRadiance = ps.tau / iter;
+
+    // Apply display mode
+    float3 result;
+    if (gDisplayMode == 1) result = avgEmission;       // Direct Only
+    else if (gDisplayMode == 2) result = avgRadiance;  // Indirect Only
+    else result = avgEmission + avgRadiance;           // Full
+    gOutputColor[pixel] = float4(result, 1.f);
+#else
+    // Standard SPPM: no radius change when no photons found (M=0), no N change
+    ps.radius2 = max(ps.radius2, gInitialRadius * gInitialRadius * 0.0001f);
+    gPixelStats[pixelIdx] = ps;
+
+    // Output: direct/iter + tau/(pi*r^2*iter)
+    float iter = float(gFrameCount + 1);
+    float3 direct = ps.emissionSum / iter;
+    float3 indirect = ps.tau / (M_PI * ps.radius2 * iter);
+
+    // Apply display mode
+    float3 result;
+    if (gDisplayMode == 1) result = direct;            // Direct Only
+    else if (gDisplayMode == 2) result = indirect;     // Indirect Only
+    else result = direct + indirect;                   // Full
+    gOutputColor[pixel] = float4(result, 1.f);
+#endif
+}
+
+[numthreads(16, 16, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint2 pixel = dispatchThreadId.xy;
+    if (any(pixel >= gFrameDim))
+        return;
+
+    uint pixelIdx = pixel.x + pixel.y * gFrameDim.x;
+
+    // Load first hit from VBuffer
+    const HitInfo hit = HitInfo(gVBuffer[pixel]);
+
+    float3 finalColor = float3(0.f);
+
+    if (!hit.isValid())
+    {
+        // Background pixel
+#if USE_ENV_BACKGROUND
+        float3 primaryRayDir = getPrimaryRayDir(pixel, gFrameDim);
+        finalColor = gScene.envMap.eval(primaryRayDir);
+#endif
+        gOutputColor[pixel] = float4(finalColor, 1.f);
+        return;
+    }
+
+    // Create sample generator
+    SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
+
+    // Load shading data
+    float3 cameraPos = gScene.camera.getPosition();
+    float3 primaryRayDir = getPrimaryRayDir(pixel, gFrameDim);
+
+    let lod = ExplicitLodTextureSampler(0.f);
+    ShadingData sd = loadShadingDataFromHit(hit, cameraPos, primaryRayDir);
+
+    float3 throughput = float3(1.0);
+    float3 emission = float3(0.0);
+    bool isDiffuse = false;
+    float3 hitPos = sd.posW;
+    float3 hitNormal = sd.getOrientedFaceNormal();
+
+    // Evaluate first hit
+    {
+        let mi = gScene.materials.getMaterialInstance(sd, lod);
+        let bsdfProperties = mi.getProperties(sd);
+
+        // Self-emission
+        emission += bsdfProperties.emission;
+
+        isDiffuse = bsdfProperties.roughness > kRoughnessThreshold;
+        hitPos = sd.posW;
+        hitNormal = sd.getOrientedFaceNormal();
+
+        // Direct lighting via NEE (only for diffuse/glossy surfaces)
+        // In PhotonDirectTest mode (gDisplayMode == 3), skip NEE — use photon map for direct lighting
+        if (isDiffuse && gDisplayMode != 3)
+        {
+            emission += evalDirectAnalytic(sd, mi, sg);
+            emission += evalDirectEmissive(sd, mi, sg);
+        }
+    }
+
+    // If specular, trace camera path to find diffuse surface
+    if (!isDiffuse)
+    {
+        SceneRayQuery<1> rayQuery;
+
+        for (uint bounce = 0; bounce < kMaxCameraBounces; bounce++)
+        {
+            let curMi = gScene.materials.getMaterialInstance(sd, lod);
+
+            BSDFSample bsdfSample;
+            if (!curMi.sample(sd, sg, bsdfSample, true))
+            {
+                writeEarlyExit(pixel, pixelIdx, emission);
+                return;
+            }
+
+            throughput *= bsdfSample.weight;
+
+            bool transmission = bsdfSample.isLobe(LobeType::Transmission);
+            float3 rayOrigin = sd.computeRayOrigin(!transmission);
+            float3 rayDir = bsdfSample.wo;
+
+            // Inline ray trace
+            const Ray ray = Ray(rayOrigin, rayDir, 0.f, FLT_MAX);
+            float hitT;
+            HitInfo nextHit = rayQuery.traceRay(ray, hitT, RAY_FLAG_NONE, 0xff);
+            if (!nextHit.isValid())
+            {
+#if USE_ENV_LIGHT
+                emission += throughput * gScene.envMap.eval(rayDir);
+#endif
+                writeEarlyExit(pixel, pixelIdx, emission);
+                return;
+            }
+
+            // Load new shading data
+            sd = loadShadingDataFromHit(nextHit, rayOrigin, rayDir);
+            let nextMi = gScene.materials.getMaterialInstance(sd, lod);
+            let nextProps = nextMi.getProperties(sd);
+
+            emission += throughput * nextProps.emission;
+
+            isDiffuse = nextProps.roughness > kRoughnessThreshold;
+            hitPos = sd.posW;
+            hitNormal = sd.getOrientedFaceNormal();
+
+            if (isDiffuse)
+            {
+                // Direct lighting via NEE at the diffuse surface found after specular bounces
+                // In PhotonDirectTest mode (gDisplayMode == 3), skip NEE
+                if (gDisplayMode != 3)
+                {
+                    emission += throughput * evalDirectAnalytic(sd, nextMi, sg);
+                    emission += throughput * evalDirectEmissive(sd, nextMi, sg);
+                }
+                break;
+            }
+
+            // Russian Roulette for camera path
+            if (bounce >= 3)
+            {
+                float rrVal = min((throughput.x + throughput.y + throughput.z) / 3.0, 0.95f);
+                if (sampleNext1D(sg) >= rrVal)
+                {
+                    writeEarlyExit(pixel, pixelIdx, emission);
+                    return;
+                }
+                throughput /= rrVal;
+            }
+        }
+    }
+
+    // No diffuse surface found after max bounces
+    if (!isDiffuse)
+    {
+        writeEarlyExit(pixel, pixelIdx, emission);
+        return;
+    }
+
+    // ========================================
+    // Load per-pixel statistics
+    // ========================================
+    PPMPixelStats ps = gPixelStats[pixelIdx];
+
+    // Initialize on first frame
+    if (gFrameCount == 0)
+    {
+        ps.radius2 = gInitialRadius * gInitialRadius;
+        ps.N = 0;
+        ps.tau = float3(0);
+        ps.emissionSum = float3(0);
+    }
+
+#if USE_PROBABILISTIC_PPM
+    // Probabilistic PPM: use global radius schedule r_k = r_0 * k^{-(1-alpha)/2}
+    // gCurrentRadius is computed on CPU side from iteration count
+    float currentRadius = gCurrentRadius;
+    float currentRadius2 = currentRadius * currentRadius;
+#else
+    // Standard SPPM: use per-pixel radius
+    float currentRadius = sqrt(ps.radius2);
+    float currentRadius2 = ps.radius2;
+#endif
+
+    // Re-acquire material instance for the final diffuse hit point
+    let finalMi = gScene.materials.getMaterialInstance(sd, lod);
+
+    // ========================================
+    // Photon density estimation using sorted photon array
+    // 使用连续内存访问替代 linked list 遍历，GPU 友好
+    // ========================================
+    float3 photonContrib = float3(0.f);
+    uint photonCount = 0;  // M: number of photons found this frame
+
+
+    // 确定需要搜索的 hash grid cells
+    int3 minCell = worldToCell(hitPos - float3(currentRadius), gCellSize);
+    int3 maxCell = worldToCell(hitPos + float3(currentRadius), gCellSize);
+
+
+    // 遍历邻近 cells
+    for (int cz = minCell.z; cz <= maxCell.z; cz++)
+    {
+        for (int cy = minCell.y; cy <= maxCell.y; cy++)
+        {
+            for (int cx = minCell.x; cx <= maxCell.x; cx++)
+            {
+                int3 cell = int3(cx, cy, cz);
+                uint cellIdx = hashGridCellIndex(cell);
+
+                // 从 offset table 获取该 cell 的起始位置和光子数量
+                uint cellStart = gCellOffset.Load(cellIdx * 4);
+                uint cellPhotonCount = min(gCellCounter[cellIdx], MAX_PHOTONS_PER_CELL);
+
+                // 连续内存访问：遍历该 cell 中的所有光子
+                for (uint i = 0; i < cellPhotonCount; i++)
+                {
+                    PPMPhotonSorted photon = gSortedPhotonBuffer[cellStart + i];
+
+                    float3 diff = photon.posW - hitPos;
+                    float distSq = dot(diff, diff);
+
+
+                    if (distSq < currentRadius2)
+                    {
+                        // 检查法线方向一致性
+                        float NdotD = dot(hitNormal, photon.dirW);
+                        if (NdotD > 0.01f)
+                        {
+                            // Photon mapping density estimate:
+                            //   L += f_r(wo, wi) * photon.flux / (pi * r^2)
+                            // eval() returns f_r * cos(theta), so divide by cos to get pure f_r.
+                            float3 bsdfVal = finalMi.eval(sd, photon.dirW, sg);
+                            float cosTheta = abs(dot(sd.frame.N, photon.dirW));
+                            if (cosTheta > 1e-4f)
+                                bsdfVal /= cosTheta;
+
+                            // Accumulate: throughput * f_r * photon_flux
+                            photonContrib += throughput * bsdfVal * photon.flux;
+                            photonCount++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    // ========================================
+    // Progressive update - two modes
+    // ========================================
+
+#if USE_PROBABILISTIC_PPM
+    // ========================================
+    // Mode 1: Probabilistic PPM (Knaus & Zwicker 2011)
+    // "Memoryless" progressive photon mapping:
+    //   - Global radius schedule: r_k = r_0 * k^{-(1-alpha)/2}
+    //   - Per-frame independent radiance estimate: L_k = photonContrib / (pi * r_k^2)
+    //   - Final result: L = (1/N) * sum_{k=1}^{N} L_k
+    //   - No per-pixel radius, no per-pixel photon count, no tau recursion
+    // ========================================
+    float3 frameRadiance = photonContrib / (M_PI * currentRadius2);
+
+    // Accumulate into running sum (tau stores sum of all L_k)
+    ps.tau += frameRadiance;
+    ps.emissionSum += emission;
+
+    // Write back (no radius2 or N update needed in probabilistic mode)
+    gPixelStats[pixelIdx] = ps;
+
+    // Output: running average over all iterations
+    float iter = float(gFrameCount + 1);
+    float3 avgEmission = ps.emissionSum / iter;
+    float3 avgRadiance = ps.tau / iter;
+
+    // Apply display mode
+    if (gDisplayMode == 1) finalColor = avgEmission;       // Direct Only
+    else if (gDisplayMode == 2) finalColor = avgRadiance;  // Indirect Only
+    else if (gDisplayMode == 3) finalColor = avgEmission + avgRadiance; // PhotonDirectTest: photon map direct + self-emission
+    else finalColor = avgEmission + avgRadiance;           // Full
+
+#else
+    // ========================================
+    // Mode 2: Standard SPPM (Hachisuka et al. 2009)
+    // Nnew = N + alpha * M
+    // r_new^2 = r_old^2 * Nnew / (N + M)
+    // tau = (tau + Phi) * (r_new^2 / r_old^2)
+    // Output: direct/iter + tau / (pi * r^2 * iter)
+    // ========================================
+    if (photonCount > 0)
+    {
+        float M = float(photonCount);
+        float Nnew = ps.N + gAlpha * M;
+        float NplusM = ps.N + M;
+        float radius2New = ps.radius2 * (Nnew / NplusM);
+
+        // Scale tau: old tau + new Phi, then scale by area ratio
+        float ratioScale = radius2New / ps.radius2;
+        ps.tau = (ps.tau + photonContrib) * ratioScale;
+
+        ps.N = Nnew;
+        ps.radius2 = radius2New;
+
+        // Clamp minimum radius
+        ps.radius2 = max(ps.radius2, gInitialRadius * gInitialRadius * 0.0001f);
+    }
+
+    // Accumulate emission
+    ps.emissionSum += emission;
+
+    // Write back
+    gPixelStats[pixelIdx] = ps;
+
+    // Output: direct average + tau / (pi * r^2 * iter)
+    float iter = float(gFrameCount + 1);
+    float3 direct = ps.emissionSum / iter;
+    float3 indirect = ps.tau / (M_PI * ps.radius2 * iter);
+
+    // Apply display mode
+    if (gDisplayMode == 1) finalColor = direct;            // Direct Only
+    else if (gDisplayMode == 2) finalColor = indirect;     // Indirect Only
+    else if (gDisplayMode == 3) finalColor = direct + indirect; // PhotonDirectTest: photon map direct + self-emission
+    else finalColor = direct + indirect;                   // Full
+
+#endif
+
+    gOutputColor[pixel] = float4(finalColor, 1.f);
+}

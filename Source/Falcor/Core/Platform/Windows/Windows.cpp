@@ -517,30 +517,38 @@ static bool fileDialogCommon(const FileDialogFilterVec& filters, std::filesystem
 {
     FilterSpec fs(filters, typeid(DialogType) == typeid(IFileOpenDialog));
 
-    DialogType* pDialog;
+    DialogType* pDialog = nullptr;
     if (FAILED(CoCreateInstance(clsid, NULL, CLSCTX_ALL, IID_PPV_ARGS(&pDialog))))
         FALCOR_THROW("Failed to create file dialog.");
+    
+    bool result = false;
+    
     pDialog->SetOptions(options | FOS_FORCEFILESYSTEM);
     pDialog->SetFileTypes((uint32_t)fs.size(), fs.data());
     pDialog->SetDefaultExtension(fs.data()->pszSpec);
 
     if (pDialog->Show(nullptr) == S_OK)
     {
-        IShellItem* pItem;
+        IShellItem* pItem = nullptr;
         if (pDialog->GetResult(&pItem) == S_OK)
         {
-            PWSTR pathStr;
+            PWSTR pathStr = nullptr;
             if (pItem->GetDisplayName(SIGDN_FILESYSPATH, &pathStr) == S_OK)
             {
                 path = pathStr;
                 // filename = wstring_2_string(std::wstring(path)); // TODO
                 CoTaskMemFree(pathStr);
-                return true;
+                result = true;
             }
+            if (pItem)
+                pItem->Release();
         }
     }
+    
+    if (pDialog)
+        pDialog->Release();
 
-    return false;
+    return result;
 }
 
 bool saveFileDialog(const FileDialogFilterVec& filters, std::filesystem::path& path)

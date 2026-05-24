@@ -41,6 +41,7 @@
 
 #include <filesystem>
 #include <algorithm>
+#include <comdef.h>
 
 FALCOR_EXPORT_D3D12_AGILITY_SDK
 
@@ -970,5 +971,42 @@ int runMain(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-    return catchAndReportAllExceptions([&]() { return runMain(argc, argv); });
+    int result = 1;
+    try
+    {
+        result = runMain(argc, argv);
+    }
+    catch (const std::exception& e)
+    {
+        Falcor::reportErrorAndContinue(std::string("Caught an exception:\n\n") + e.what());
+    }
+    catch (const _com_error& e)
+    {
+        std::string errorMsg = "N/A";
+        if (e.ErrorMessage())
+        {
+            const TCHAR* tMsg = e.ErrorMessage();
+#ifdef UNICODE
+            int len = WideCharToMultiByte(CP_UTF8, 0, tMsg, -1, nullptr, 0, nullptr, nullptr);
+            if (len > 0)
+            {
+                errorMsg.resize(len - 1);
+                WideCharToMultiByte(CP_UTF8, 0, tMsg, -1, errorMsg.data(), len, nullptr, nullptr);
+            }
+#else
+            errorMsg = tMsg;
+#endif
+        }
+        std::string msg = "Caught a COM exception!\nHRESULT: 0x" +
+            fmt::format("{:08X}", (unsigned long)e.Error()) +
+            "\nMessage: " + errorMsg +
+            "\n\nStacktrace:\n" + Falcor::getStackTrace(0);
+        Falcor::reportErrorAndContinue(msg);
+    }
+    catch (...)
+    {
+        std::string msg = "Caught an exception of unknown type!\n\nStacktrace:\n" + Falcor::getStackTrace(0);
+        Falcor::reportErrorAndContinue(msg);
+    }
+    return result;
 }
